@@ -1,0 +1,235 @@
+plugins {
+    id "mx.com.inftel.wildfly" version "1.0.2"
+}
+
+group "ru.bardinpetr.itmo"
+version "0.3"
+
+repositories {
+    mavenCentral()
+    maven { url "https://repo.gradle.org/gradle/libs-releases" }
+}
+
+ext {
+    junit_ver = "5.9.1"
+
+    srcDir = findProperty('srcDir') ?: 'src'
+
+    javaDir = findProperty('javaDir') ?: System.getenv('JAVA_HOME')
+    compileFlags = findProperty('compileFlags') ?: ''
+
+    mainClassesDir = layout.buildDirectory.dir("tmp/WEB-INF/classes").get()
+    testClassesDir = layout.buildDirectory.dir("test/classes").get()
+
+    javadocDir = layout.buildDirectory.dir("docs").get()
+}
+
+configurations {
+    javaLib
+    testLib {
+        extendsFrom configurations.javaLib
+    }
+}
+
+configurations.all {
+    resolutionStrategy.eachDependency { DependencyResolveDetails details ->
+//        if (details.requested.version == 'default') {
+//            def version = findDefaultVersionInCatalog(details.requested.group, details.requested.name)
+//            details.useVersion version.version
+//            details.because version.because
+//        }
+        if(details.requested.name == "junit-jupiter-params") {
+            println('!!!')
+            println(details)
+        }
+    }
+//    resolutionStrategy {
+//        force 'org.junit.jupiter:junit-jupiter-params:5.9.1:runtimeElements'
+//    }
+}
+
+dependencies {
+    // JAKARTA 10 WEB
+    javaLib "jakarta.platform:jakarta.jakartaee-web-api:10.0.0"
+    javaLib "org.glassfish.web:web:10.0-b28"
+
+    // WEB
+    javaLib "org.primefaces:primefaces:13.0.0:jakarta"
+    javaLib "org.jboss.weld.se:weld-se-core:5.1.2.Final"
+
+    // validation
+    javaLib "org.hibernate.validator:hibernate-validator:7.0.5.Final"
+
+    // JPA
+    javaLib "org.eclipse.persistence:org.eclipse.persistence.jpa:4.0.2"
+    javaLib "org.eclipse.persistence:eclipselink:4.0.2"
+
+    // Logging
+    javaLib "org.slf4j:slf4j-api:2.0.7"
+    javaLib "ch.qos.logback:logback-core:1.4.7"
+    javaLib "ch.qos.logback:logback-classic:1.4.7"
+
+    // JWT
+    javaLib "io.jsonwebtoken:jjwt-api:0.11.5"
+    javaLib "io.jsonwebtoken:jjwt-impl:0.11.5"
+    javaLib "io.jsonwebtoken:jjwt-jackson:0.11.5"
+
+    // Tests
+    testLib "org.junit.jupiter:junit-jupiter-api:${junit_ver}"
+    testLib "org.junit.jupiter:junit-jupiter-engine:${junit_ver}"
+    testLib ("org.junit.jupiter:junit-jupiter-params:${junit_ver}") {
+        attributes{
+            it.attribute(Bundling.BUNDLING_ATTRIBUTE, objects.named(Bundling, "external"))
+        }
+    }
+    testLib 'org.assertj:assertj-core:3.4.1'
+}
+
+tasks.register('clean', Delete) {
+    delete buildDir
+}
+
+tasks.register('compileSrc', Exec) {
+    println "use javac dir ${javaDir} and additional flags ${compileFlags}"
+    def commandd = [
+            "${javaDir}/bin/javac",
+            '-cp', configurations.javaLib.asPath,
+            '-d', mainClassesDir,
+    ]
+
+    if (!compileFlags.empty) {
+        commandd.addAll(compileFlags)
+    }
+    commandLine = commandd
+
+    def sourceFiles = fileTree(dir: "${srcDir}/main/java/")
+    sourceFiles.include('**/*.java')
+    sourceFiles.each { File file ->
+        args file
+    }
+}
+
+tasks.register('compileTest', Exec) {
+    dependsOn('compileSrc')
+
+    def classpath = configurations.testLib.asPath + ":" + mainClassesDir
+    commandLine = [
+            "${javaDir}/bin/javac",
+            '-cp', classpath,
+            '-d', testClassesDir
+    ]
+    fileTree(dir: "${srcDir}/test/java/")
+            .matching { include('**/*.java') }
+            .forEach { File file ->
+                args file
+            }
+}
+
+tasks.register("native2ascii", Native2ASCIITask) {
+    dependsOn("cpRes")
+    inputDir = layout.buildDirectory.dir("tmp/WEB-INF/classes").get()
+}
+
+tasks.register('cpRes', Copy) {
+    from "${srcDir}/main/resources/"
+    includeEmptyDirs = false
+    exclude '**/*.java'
+    into "${buildDir}/tmp/WEB-INF/classes/"
+}
+
+tasks.register('cpView', Copy) {
+    from "${srcDir}/main/webapp/"
+    into "${buildDir}/tmp/"
+    exclude "src/"
+}
+
+tasks.register('cpLib', Copy) {
+    from configurations.javaLib.files
+    into "${buildDir}/tmp/WEB-INF/lib"
+}
+
+tasks.register('createManifest') {
+    doLast {
+        def hashes = HashHelper.generateManifestHashes(mainClassesDir)
+
+        project.mkdir("${buildDir}/tmp/META-INF/")
+
+        file("${buildDir}/tmp/META-INF/MANIFEST.MF")
+                .text = "Manifest-Version: 1.0\n" +
+                "Implementation-Version: ${version}\n\n" +
+                "${hashes}\n"
+    }
+}
+
+tasks.register('doc', Copy) {
+    dependsOn('createManifest', 'javadocCompile')
+
+    from javadocDir
+    into "${buildDir}/tmp/docs/"
+}
+
+tasks.register("war", Zip) {
+    dependsOn('compileSrc', 'cpRes', 'cpView', 'cpLib', 'doc', 'native2ascii')
+
+    from "${buildDir}/tmp/"
+    archiveFileName = "${srcDir}.war"
+    destinationDirectory = file("${buildDir}/dist")
+}
+
+tasks.register("music", MusicTask) {
+    dependsOn("war")
+    music = file("buildSrc/src/main/resources/ding.mp3")
+}
+
+tasks.register("javadocCompile", JavadocTask) {
+    classpath = (configurations.javaLib + configurations.testLib).asPath
+    buildDir = javadocDir
+    sourceDir = layout.projectDirectory.dir("src")
+    arguments = ['-quiet', '-Xdoclint:-missing']
+}
+
+tasks.register("javadocZip", Zip) {
+    dependsOn('javadocCompile')
+
+    from javadocDir
+    archiveFileName = "docs.zip"
+    destinationDirectory = layout.buildDirectory.get()
+}
+
+tasks.register("test", JUnitTask) {
+    dependsOn("compileTest")
+
+    testConfiguration = configurations.testLib
+    sourceClasses = mainClassesDir
+    testClasses = testClassesDir
+    reportDir = layout.buildDirectory.dir("report").get()
+}
+
+tasks.register("report", ReportPusherTask) {
+    dependsOn("test")
+
+    reportBuildDirectory = layout.buildDirectory.dir('report')
+    reportStoreDirectory = layout.projectDirectory.dir('reports')
+}
+
+tasks.register("teamsrc", TeamTask)
+
+tasks.register("team", Zip) {
+    dependsOn('teamsrc')
+
+    from layout.buildDirectory.dir("team").get()
+    archiveFileName = "team.zip"
+    destinationDirectory = layout.buildDirectory.get()
+}
+
+/* Deploy */
+wildfly {
+    controller = "remote+http://localhost:59883"
+    username = "admin"
+    password = "1234"
+    deployment = "build/dist/src.war"
+    persistent = false
+}
+tasks.named("wildflyDeploy") {
+    dependsOn("war")
+}
